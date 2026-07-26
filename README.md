@@ -8,7 +8,7 @@ No build step. No dependencies. Runs in your browser, inside Trilium.
 
 - **Three toolbar buttons** in Trilium: 🔒 Encrypt selection, 🔓 Decrypt ENC0 blocks, 🔒 Forget ENC0 cache
 - **Three hotkeys**: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> / <kbd>D</kbd> / <kbd>F</kbd>
-- **Compatible** with Evernote's `<en-crypt>` ENC0 format — same magic, same PBKDF2 / AES-128-CBC / HMAC-SHA256, same parameter choices (50 000 iterations, 16-byte keys, 16-byte IV, 16-byte salts).
+- **Compatible** with Evernote's `<en-crypt>` ENC0 format — same magic, same PBKDF2 / AES-128-CBC / HMAC-SHA256, same parameter choices (50,000 iterations, 16-byte keys, 16-byte IV, 16-byte salts).
 - **Interoperable** with ENEX: encrypted blocks survive the ENEX round-trip and decrypt correctly in Evernote desktop.
 - **Browser-only** — uses Web Crypto API. No servers, no keys transmitted anywhere.
 
