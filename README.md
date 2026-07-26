@@ -2,7 +2,7 @@
 
 Pure-JS Trilium note script that lets you encrypt any portion of any Trilium note using the same `<en-crypt>` format Evernote desktop / ENEX uses. Encrypted sections round-trip with Evernote: encrypt in Trilium, export to ENEX, import into Evernote, decrypt there with the same password.
 
-No build step. No dependencies. No Python. Runs in your browser, inside Trilium.
+No build step. No dependencies. Runs in your browser, inside Trilium.
 
 ## What you get
 
