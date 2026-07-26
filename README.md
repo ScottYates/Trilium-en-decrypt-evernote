@@ -15,12 +15,12 @@ No build step. No dependencies. Runs in your browser, inside Trilium.
 ## Install (~30 seconds)
 
 1. In Trilium, create a new note.
-2. Set its type to **JS Code** (right-click → Note type → Code, language JavaScript). In the note's attributes, the `#type` label should be `code` and `#mime` should be `application/javascript`.
+2. Set its type to **code** (set the language to "JavaScript - Trilium Frontend").
 3. Paste the entire contents of [`trilium_enc0.js`](./trilium_enc0.js) into the note body.
-4. Add the label `#run=frontendStartup` to the note (the leading `#` is intentional — that's the `~` icon in Trilium's label picker, which means "promoted to attribute"). The label name you want is exactly `run=frontendStartup`.
+4. Add the label `#run=frontendStartup` to the note (the leading `#` is intentional — that's the `~` icon in Trilium's label picker, which means "promoted to attribute"). The label name you want is exactly `#run=frontendStartup`.
 5. Save the note. Reload the Trilium frontend (Ctrl+R, or close and reopen). The script registers itself and stays installed across reloads.
 
-To verify: open the browser dev tools console (F12) and look for `[trilium-enc0] module installed` and `[enc0:hotkey] hotkeys: CTRL+SHIFT+E, CTRL+SHIFT+D, CTRL+SHIFT+F`.
+To verify: open the browser dev tools console and look for `[trilium-enc0] module installed` and `[enc0:hotkey] hotkeys: CTRL+SHIFT+E, CTRL+SHIFT+D, CTRL+SHIFT+F`.
 
 ## Use
 
