@@ -44,6 +44,19 @@ To verify: open the browser dev tools console and look for `[trilium-enc0] modul
 - <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd>, or 🔒 in the toolbar.
 - The cache is in-memory only and is wiped automatically when you reload Trilium. Forgetting manually is useful if you're stepping away from the keyboard.
 
+### Wrap raw ENC0 blobs (toolbar button only — no hotkey)
+
+Useful when you paste a raw Evernote `<en-crypt>` blob into a note (e.g. from an ENEX export or copy-paste from a screenshot) without its `<en-crypt>` wrapper, and then want the "Decrypt" action to find it.
+
+The action scans the active note for any base64 string that:
+- starts with the b64 of `"ENC0"` (i.e. `RU5DM` + a char in `A`–`P`)
+- is at least 112 base64 chars long (= 84 raw bytes — the minimum valid ENC0 blob: 4 magic + 16 salt + 16 salthmac + 16 iv + 32 hmac)
+- isn't already inside an existing `<en-crypt>...</en-crypt>` tag
+
+…and wraps each one in `<en-crypt cipher="AES" hint="" length="128">…</en-crypt>`. Multiple blobs per note are handled in one pass.
+
+The HMAC is NOT verified (we don't have a password yet); a blob that was tampered with will simply fail to decrypt when you later run "Decrypt ENC0 blocks".
+
 ### Password cache
 
 For convenience, when you type a password for an `<en-crypt>` block, the script caches it (keyed by the block's hint). When you later run "Decrypt all blocks", blocks that share a hint with a cached password are decrypted without re-prompting.
@@ -120,6 +133,7 @@ All crypto uses Web Crypto API (`crypto.subtle`) — no third-party libraries.
 | `_test_modal.js` | tests the custom password prompt modal (3) |
 | `_test_async_helpers.js` | tests the Trilium-API wrappers (note text, editor, etc.) (28) |
 | `_test_out_of_order.js` | tests the bug that was the whole reason this script exists: out-of-order decryption with mixed passwords (51) |
+| `_test_wrap_blobs.js` | tests the "wrap raw ENC0 blobs" action: finding orphan base64 and wrapping in `<en-crypt>` (16) |
 
 ## Security notes
 

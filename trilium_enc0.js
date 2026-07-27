@@ -40,12 +40,17 @@
  *   phase keydown listener on document, so they win over any other
  *   handler in the page.
  *
+ *   The "wrap raw ENC0 blobs" action (🏷️) is toolbar-only — no
+ *   hotkey — because it's a less-frequent operation and the others
+ *   are the ones you reach for in everyday use.
+ *
  * --------------------------------------------------------------------
  * Usage
  * --------------------------------------------------------------------
- *   After install, three buttons appear in the Trilium toolbar (and
+ *   After install, four buttons appear in the Trilium toolbar (and
  *   the three hotkeys above work from anywhere):
- *     🔒 Encrypt selection   🔓 Decrypt ENC0 blocks   🔒 Forget ENC0 cache
+ *     🔒 Encrypt selection   🔓 Decrypt ENC0 blocks
+ *     🏷️ Wrap raw ENC0 blobs  🔒 Forget ENC0 cache
  *
  *   - Open a note. Select text in the body. Click "🔒 Encrypt selection"
  *     (or press CTRL+SHIFT+E). A password prompt (and an optional
@@ -1225,6 +1230,111 @@
     g.notify('Cached ENC0 passwords cleared.');
   }
 
+  // Find raw ENC0 base64 blobs in the active note and wrap each one
+  // in a <en-crypt> tag so the decrypt action can find it. This is
+  // for notes that were imported from Evernote/ENEX where the
+  // <en-crypt> wrapper was stripped or the plaintext was pasted
+  // directly. We identify a blob by:
+  //   - starts with the base64 of "ENC0" (i.e. "RU5DMA==")
+  //   - has at least 84 raw bytes of content (4 magic + 16 salt +
+  //     16 salthmac + 16 iv + 32 hmac = 84), which is 112 base64
+  //     chars including the "RU5DMA==" prefix
+  //   - is a continuous run of base64 chars (no whitespace, no
+  //     '<', no '>') — so it won't match across HTML tags
+  //   - is not already inside an existing <en-crypt>...</en-crypt>
+  // The HMAC is NOT verified (we don't have a password yet); we
+  // just tag the text so a later decrypt-with-password can pick it
+  // up. A bad tag will just fail to decrypt.
+  async function actionWrapEnCryptBlobs() {
+    const g = globalThis.__trilium_enc0__;
+    const note = await g.getActiveNote();
+    if (!note) { g.notifyError('No active note.'); return; }
+    const originalText = await g.getNoteText(note);
+    if (!originalText) { g.notify('Note is empty.'); return; }
+
+    // Collect existing <en-crypt> regions so we don't double-wrap.
+    // We use a list of [start, end] pairs and check each raw-blob
+    // match against them.
+    const existingRegions = [];
+    const tagRe = /<en-crypt\b[^>]*>[\s\S]*?<\/en-crypt>/g;
+    let m;
+    while ((m = tagRe.exec(originalText))) {
+      existingRegions.push([m.index, m.index + m[0].length]);
+    }
+
+    // Find raw ENC0 blobs. The b64 of the first 4 bytes ("ENC0" =
+    // 0x45 0x4E 0x43 0x30) is "RU5DM" followed by a char in 'A'..'P'
+    // (the high nibble of the 5th byte is 0 because byte 4 is 0x30).
+    // The 6th b64 char encodes 00xxxx where xxxx is the high nibble
+    // of byte 5, so it falls in 'A' (00 0000) to 'P' (00 1111).
+    // (The full "RU5DMA==" prefix only appears for a 4-byte blob;
+    // longer blobs shift the boundary and produce a different 6th
+    // char.) We require 104+ more b64 chars (so the raw bytes are
+    // at least 84 — the 4 magic + 16 salt + 16 salthmac + 16 iv +
+    // 32 hmac minimum). The regex doesn't match across whitespace,
+    // '<', or '>', so it won't grab HTML tags.
+    const blobRe = /RU5DM[A-P][A-Za-z0-9+/=]{106,}/g;
+    const candidates = [];
+    while ((m = blobRe.exec(originalText))) {
+      const start = m.index;
+      const end = start + m[0].length;
+      // Skip if this blob is inside an existing <en-crypt> tag.
+      let insideExisting = false;
+      for (const [rs, re] of existingRegions) {
+        if (start >= rs && end <= re) { insideExisting = true; break; }
+      }
+      if (!insideExisting) {
+        candidates.push({ start, end, text: m[0] });
+      }
+    }
+
+    if (candidates.length === 0) {
+      g.notify('No raw ENC0 blobs found in this note.');
+      return;
+    }
+
+    // Wrap each match. Build the new text right-to-left so the
+    // earlier indices don't shift as we insert text.
+    let newText = originalText;
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      const { start, end, text: blob } = candidates[i];
+      newText = newText.slice(0, start)
+        + '<en-crypt cipher="AES" hint="" length="128">' + blob + '</en-crypt>'
+        + newText.slice(end);
+    }
+
+    await g.setNoteText(note, newText);
+
+    // Refresh the editor view so the user sees the wrapped version.
+    // We use the same cascade as the decrypt action: CKEditor 5
+    // model API first (preserves formatting), then setData
+    // fallback, then DOM replacement.
+    const ed = await g.getActiveTextEditor();
+    if (ed) {
+      const editor = (ed._context && ed._context.editor) || ed;
+      // The simplest reliable update is setData — the model is
+      // small and the user just ran an explicit "wrap" action.
+      if (typeof ed.getData === 'function' && typeof ed.setData === 'function') {
+        try { ed.setData(newText); } catch (e) { /* best effort */ }
+      } else {
+        const root = editor.model && editor.model.document && editor.model.document.getRoot();
+        if (root && editor.model.change) {
+          editor.model.change(writer => {
+            try {
+              while (root.getChild(0)) writer.remove(root.getChild(0));
+            } catch (e) {}
+            try {
+              const fragment = writer.createHtmlElementFromString(newText);
+              writer.insert(fragment, root, 'end');
+            } catch (e) {}
+          });
+        }
+      }
+    }
+
+    g.notify('Tagged ' + candidates.length + ' raw ENC0 blob' + (candidates.length === 1 ? '' : 's') + '.');
+  }
+
   // ============================================================
   //  7. CSS (placeholder styling kept for future use)
   // ============================================================
@@ -1297,9 +1407,10 @@
     // We use addButtonToToolbar instead. Each button operates on whatever
     // note is the active context.
     const items = [
-      { title: '🔒 Encrypt selection',     icon: 'lock',      action: actionEncryptSelection },
-      { title: '🔓 Decrypt ENC0 blocks',   icon: 'lock-open', action: actionDecryptAllInNote },
-      { title: '🔒 Forget ENC0 cache',     icon: 'eraser',    action: actionForgetCachedPasswords }
+      { title: '🔒 Encrypt selection',     icon: 'lock',        action: actionEncryptSelection },
+      { title: '🔓 Decrypt ENC0 blocks',   icon: 'lock-open',   action: actionDecryptAllInNote },
+      { title: '🏷️ Wrap raw ENC0 blobs',  icon: 'tag',         action: actionWrapEnCryptBlobs },
+      { title: '🔒 Forget ENC0 cache',     icon: 'eraser',      action: actionForgetCachedPasswords }
     ];
 
     let registered = 0;
@@ -1567,6 +1678,7 @@
     // the three actions (so other notes can call them too)
     actionEncryptSelection,
     actionDecryptAllInNote,
+    actionWrapEnCryptBlobs,
     actionForgetCachedPasswords,
 
     // HTML-encoding helper used by the setData path. The eval'd
