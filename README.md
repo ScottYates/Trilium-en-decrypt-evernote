@@ -6,10 +6,10 @@ No build step. No dependencies. Runs in your browser, inside Trilium.
 
 ## What you get
 
-- **Three toolbar buttons** in Trilium: 🔒 Encrypt selection, 🔓 Decrypt ENC0 blocks, 🔒 Forget ENC0 cache
-- **Three hotkeys**: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> / <kbd>D</kbd> / <kbd>F</kbd>
-- **Compatible** with Evernote's `<en-crypt>` ENC0 format — same magic, same PBKDF2 / AES-128-CBC / HMAC-SHA256, same parameter choices (50,000 iterations, 16-byte keys, 16-byte IV, 16-byte salts).
-- **Interoperable** with ENEX: encrypted blocks survive the ENEX round-trip and decrypt correctly in Evernote desktop.
+- **Four toolbar buttons** in Trilium: 🔒 Encrypt selection, 🔓 Decrypt ENC0 blocks, 🏷️ Wrap raw ENC0 blobs, 🔒 Forget ENC0 cache
+- **Three hotkeys**: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> / <kbd>D</kbd> / <kbd>F</kbd> (the "wrap" button is toolbar-only — no hotkey, because it's a less-frequent operation)
+- **Compatible** with Evernote's `<en-crypt>` ENC0 format — same magic, same PBKDF2 / AES-128-CBC / HMAC-SHA256, same parameter choices (50,000 iterations, 16-byte AES key, 16-byte HMAC key, 16-byte IV, 16-byte salts).
+- **Interoperable** with ENEX: encrypted blocks survive the ENEX round-trip and decrypt correctly in Evernote desktop. The HMAC key length matches Evernote exactly — blobs you encrypt in Trilium can be decrypted in Evernote desktop and vice versa (verified: the beernutz/.-MDS-. DC++ hub note from Evernote decrypts cleanly).
 - **Browser-only** — uses Web Crypto API. No servers, no keys transmitted anywhere.
 
 ## Install (~30 seconds)
@@ -20,7 +20,7 @@ No build step. No dependencies. Runs in your browser, inside Trilium.
 4. Add the label `#run=frontendStartup` to the note (the leading `#` is intentional — that's the `~` icon in Trilium's label picker, which means "promoted to attribute"). The label name you want is exactly `#run=frontendStartup`.
 5. Save the note. Reload the Trilium frontend (Ctrl+R, or close and reopen). The script registers itself and stays installed across reloads.
 
-To verify: open the browser dev tools console and look for `[trilium-enc0] module installed` and `[enc0:hotkey] hotkeys: CTRL+SHIFT+E, CTRL+SHIFT+D, CTRL+SHIFT+F`.
+To verify: open the browser dev tools console and look for `[trilium-enc0] registered 4 UI hooks total`, `[enc0:hotkey] hotkeys: CTRL+SHIFT+E, CTRL+SHIFT+D, CTRL+SHIFT+F`, and `[trilium-enc0] module installed`.
 
 ## Use
 
@@ -57,6 +57,8 @@ The action scans the active note for any base64 string that:
 
 The HMAC is NOT verified (we don't have a password yet); a blob that was tampered with will simply fail to decrypt when you later run "Decrypt ENC0 blocks".
 
+**Implementation note:** CKEditor 5's `setData()` silently strips unknown elements like `<en-crypt>`, so the wrap action updates the editor via the **CKEditor model API** instead — it finds the text node containing the b64, splits it at the right offsets, and inserts the wrap markers as text. CKEditor then HTML-escapes the angle brackets to `&lt;` and `&gt;` on serialization, which is exactly the form the Decrypt walker already expects. The note's stored content (in the DB) keeps the literal `<en-crypt>…</en-crypt>` tags, so the note remains Evernote-compatible.
+
 ### Password cache
 
 For convenience, when you type a password for an `<en-crypt>` block, the script caches it (keyed by the block's hint). When you later run "Decrypt all blocks", blocks that share a hint with a cached password are decrypted without re-prompting.
@@ -87,19 +89,37 @@ Reload Trilium for changes to take effect.
 
 ## Tests
 
-The repo ships 122 unit tests across five files. They use a minimal in-memory mock of the CKEditor 5 model — no real Trilium or browser needed.
+The repo ships 138 unit tests across six files, plus two Playwright tests that exercise a real CKEditor 5 instance. The unit tests use a minimal in-memory mock of the CKEditor 5 model — no real Trilium or browser needed.
 
-Run them all (Node ≥ 16):
+Run all unit tests (Node ≥ 16):
 
 ```bash
-node _test_trilium.js
-node _test_eval_boundary.js
-node _test_modal.js
-node _test_async_helpers.js
-node _test_out_of_order.js
+node _test_trilium.js           # crypto + tag round-trip (21)
+node _test_eval_boundary.js     # toolbar / hotkey action-body global access (19)
+node _test_modal.js             # custom password prompt modal (3)
+node _test_async_helpers.js     # Trilium-API wrappers (28)
+node _test_out_of_order.js      # the out-of-order / wrong-block decrypt bug (51)
+node _test_wrap_blobs.js        # wrap action (16)
 ```
 
-Each test file prints `N passed, 0 failed` and exits 0 on success. The `_test_out_of_order.js` file is the one that pinned down the out-of-order / wrong-block decryption bug — it builds three `<en-crypt>` blocks, decrypts the middle one with a wrong password, and asserts that blocks 1 and 3 still decrypt correctly into the right positions.
+Each test file prints `N passed, 0 failed` and exits 0 on success.
+
+The `_test_out_of_order.js` file is the one that pinned down the out-of-order / wrong-block decryption bug — it builds three `<en-crypt>` blocks, decrypts the middle one with a wrong password, and asserts that blocks 1 and 3 still decrypt correctly into the right positions.
+
+The `_test_wrap_blobs.js` file is the unit test for the wrap action.
+
+### Browser tests (Playwright + real CKEditor 5)
+
+Two additional tests exercise a **real** CKEditor 5 instance via Playwright. They were what caught the wrap-action bug (CKEditor 5's `setData()` silently strips unknown elements like `<en-crypt>`, so the wrap action had to switch to the model API).
+
+```bash
+npm install playwright
+npx playwright install chromium
+node _test_ckeditor_sanitize.js  # empirically confirms setData strips <en-crypt>
+node _test_wrap_ckeditor.js      # full end-to-end: wrap action puts tags in the model
+```
+
+These use the CKEditor 5 build under `../evernote-backup/ckeditor_test/node_modules/@ckeditor/ckeditor5-build-classic/` — they assume that sibling repo is checked out. Adjust the `CK_PATH` at the top of each test file if yours is elsewhere.
 
 ## Format reference
 
@@ -111,15 +131,17 @@ The encrypted body is exactly Evernote's ENC0 format:
 | 4      | 16     | salt         (PBKDF2 salt for AES key) |
 | 20     | 16     | salthmac     (PBKDF2 salt for HMAC key) |
 | 36     | 16     | iv           (AES-CBC IV) |
-| 52     | N      | AES-128-CBC ciphertext (PKCS7-padded plaintext) |
+| 52     | N      | AES-128-CBC ciphertext (PKCS7-padded plaintext; padding handled by Web Crypto) |
 | 52+N   | 32     | bodyhmac     (HMAC-SHA256 of everything before this) |
 
-Key derivation:
+Key derivation (both keys are 16 bytes — the stored HMAC field is 32 bytes because that's HMAC-SHA256's output size, not the key size):
 
 ```
 aes  = PBKDF2-HMAC-SHA256(pass, salt,     50000, 16)
-hmac = PBKDF2-HMAC-SHA256(pass, salthmac, 50000, 32)
+hmac = PBKDF2-HMAC-SHA256(pass, salthmac, 50000, 16)
 ```
+
+HMAC coverage is over the entire body (magic + salt + salthmac + iv + ciphertext), which matches the Evernote spec. Verifying the HMAC before attempting decryption means a wrong password or tampered ciphertext throws — it never silently returns garbage.
 
 All crypto uses Web Crypto API (`crypto.subtle`) — no third-party libraries.
 
@@ -134,12 +156,15 @@ All crypto uses Web Crypto API (`crypto.subtle`) — no third-party libraries.
 | `_test_async_helpers.js` | tests the Trilium-API wrappers (note text, editor, etc.) (28) |
 | `_test_out_of_order.js` | tests the bug that was the whole reason this script exists: out-of-order decryption with mixed passwords (51) |
 | `_test_wrap_blobs.js` | tests the "wrap raw ENC0 blobs" action: finding orphan base64 and wrapping in `<en-crypt>` (16) |
+| `_test_ckeditor_sanitize.js` | Playwright test against real CKEditor 5: empirically confirms `setData()` strips `<en-crypt>` |
+| `_test_wrap_ckeditor.js` | Playwright test: end-to-end wrap action against real CKEditor 5 (uses the model API, verifies the editor + DB both end up with the wrapped version) |
 
 ## Security notes
 
 - **No password recovery.** Forget the password, lose the data. That's the point.
 - **The password is never stored** — neither in the note, the cache, nor anywhere else. The cache is in-memory only and is wiped on reload.
 - **PBKDF2 with 50 000 iterations** matches Evernote's choice. If you want to push that higher, edit the iteration count in the `deriveBits` calls — but note that anything you encrypt won't decrypt in Evernote desktop anymore.
+- **HMAC key is 16 bytes** (PBKDF2 output), **HMAC field is 32 bytes** (HMAC-SHA256's natural output size). This matches Evernote exactly — a 16-byte key gives the right HMAC for their 32-byte stored field. Earlier versions of this script used a 32-byte key, which produced correct round-trips between encrypt + decrypt within the same script but failed against Evernote-produced blobs. The 16-byte key is the spec.
 - **HMAC-SHA256 verify-then-decrypt** is enforced. A wrong password or tampered ciphertext throws — it never silently returns garbage.
 - **Web Crypto API only** — no JS implementations, no third-party crypto. The browser is doing AES in native code.
 
