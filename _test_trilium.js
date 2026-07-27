@@ -42,11 +42,11 @@ if (!enc0) {
     const pw = 'swordfish';
     const blob = await enc0.encrypt(pt, pw);
     check('blob has ENC0 magic', blob[0] === 0x45 && blob[1] === 0x4E && blob[2] === 0x43 && blob[3] === 0x30);
-    // In Node, subtle.encrypt auto-pads AES-CBC; in browsers it does not.
-    // The JS module always pads manually for browser compat, so in Node the
-    // ciphertext ends up PKCS7-padded twice. That's the expected behavior.
-    const expected = 4 + 16 + 16 + 16 + 32 + Math.ceil(pt.length / 16) * 16 + 16;
-    check('blob length sane (Node auto-pads)', blob.length === expected, `got ${blob.length} expected ${expected}`);
+    // Web Crypto's AES-CBC encrypt handles PKCS7 padding itself, in
+    // both Node and browsers. Ciphertext is ceil(pt.length/16)*16
+    // bytes (4 magic + 16 salt + 16 salthmac + 16 iv + ct + 32 hmac).
+    const expected = 4 + 16 + 16 + 16 + Math.ceil(pt.length / 16) * 16 + 32;
+    check('blob length sane', blob.length === expected, `got ${blob.length} expected ${expected}`);
     const pt2 = await enc0.decrypt(blob, pw);
     const decoded = new TextDecoder('utf-8').decode(pt2);
     check('decrypts back to plaintext', decoded === pt, `got ${JSON.stringify(decoded)}`);

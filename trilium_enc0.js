@@ -76,7 +76,7 @@
  *
  *   body   = ENC0 || salt || salthmac || iv || ciphertext
  *   aes    = PBKDF2(pass, salt,    50000, sha256) -> 16 bytes
- *   hmac   = PBKDF2(pass, salthmac,50000, sha256) -> 32 bytes
+ *   hmac   = PBKDF2(pass, salthmac,50000, sha256) -> 16 bytes
  */
 
 (() => {
@@ -116,7 +116,10 @@
   const KEY_BYTES = 16;            // AES-128
   const SALT_BYTES = 16;
   const IV_BYTES = 16;
-  const HMAC_BYTES = 32;
+  // HMAC field in the blob is always 32 bytes (HMAC-SHA256 output).
+  // The HMAC KEY is derived as 16 bytes from PBKDF2 (per Evernote spec).
+  const HMAC_FIELD_BYTES = 32;     // size of the stored bodyhmac
+  const HMAC_KEY_BYTES = 16;        // PBKDF2 output for the HMAC key
   const ENC0_MAGIC = [0x45, 0x4E, 0x43, 0x30]; // "ENC0"
 
   const utf8Encode = (s) => new TextEncoder().encode(s);
@@ -163,7 +166,7 @@
     );
     const bits = await crypto.subtle.deriveBits(
       { name: 'PBKDF2', salt, iterations: ITER, hash: 'SHA-256' },
-      baseKey, 256
+      baseKey, HMAC_KEY_BYTES * 8
     );
     return crypto.subtle.importKey(
       'raw', bits, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
@@ -179,17 +182,16 @@
     const aesBits = await deriveAesBits(password, salt);
     const hmacKey = await importHmacKey(password, salthmac);
 
-    // PKCS7 pad
-    const pad = 16 - (plaintext.length % 16);
-    const padded = new Uint8Array(plaintext.length + pad);
-    padded.set(plaintext);
-    for (let i = plaintext.length; i < padded.length; i++) padded[i] = pad;
-
+    // Web Crypto's AES-CBC encrypt handles PKCS7 padding itself, so
+    // we just pass the raw plaintext. (Earlier we pre-padded here,
+    // but that caused double-padding in Node where subtle.encrypt
+    // also pads, and the doubled-padded output only had the OUTER
+    // padding stripped on decrypt.)
     const aesKey = await crypto.subtle.importKey(
       'raw', aesBits, { name: 'AES-CBC' }, false, ['encrypt']
     );
     const ctBuf = await crypto.subtle.encrypt(
-      { name: 'AES-CBC', iv }, aesKey, padded
+      { name: 'AES-CBC', iv }, aesKey, plaintext
     );
     const ct = new Uint8Array(ctBuf);
 
@@ -212,7 +214,7 @@
   }
 
   async function decryptEnc0(blob, password) {
-    if (blob.length < 4 + 2 * SALT_BYTES + IV_BYTES + HMAC_BYTES) {
+    if (blob.length < 4 + 2 * SALT_BYTES + IV_BYTES + HMAC_FIELD_BYTES) {
       throw new Error('ENC0 blob too short (' + blob.length + ' bytes)');
     }
     for (let i = 0; i < 4; i++) {
@@ -223,9 +225,9 @@
     const salt = blob.slice(4, 4 + SALT_BYTES);
     const salthmac = blob.slice(4 + SALT_BYTES, 4 + 2 * SALT_BYTES);
     const iv = blob.slice(4 + 2 * SALT_BYTES, 4 + 2 * SALT_BYTES + IV_BYTES);
-    const ct = blob.slice(4 + 2 * SALT_BYTES + IV_BYTES, blob.length - HMAC_BYTES);
-    const body = blob.slice(0, blob.length - HMAC_BYTES);
-    const bodyhmac = blob.slice(blob.length - HMAC_BYTES);
+    const ct = blob.slice(4 + 2 * SALT_BYTES + IV_BYTES, blob.length - HMAC_FIELD_BYTES);
+    const body = blob.slice(0, blob.length - HMAC_FIELD_BYTES);
+    const bodyhmac = blob.slice(blob.length - HMAC_FIELD_BYTES);
 
     const hmacKey = await importHmacKey(password, salthmac);
     const expected = new Uint8Array(
@@ -239,15 +241,14 @@
     const aesKey = await crypto.subtle.importKey(
       'raw', aesBits, { name: 'AES-CBC' }, false, ['decrypt']
     );
-    const padded = new Uint8Array(
+    // Web Crypto's AES-CBC decrypt auto-strips PKCS7 padding and
+    // throws on bad padding, so we don't need to check it ourselves.
+    // (Evernote-produced blobs in the wild have been seen with a
+    // '>' as the last byte of the unpadded plaintext — perfectly
+    // valid, just not a PKCS7 pad value, which is what tipped this off.)
+    return new Uint8Array(
       await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, aesKey, ct)
     );
-    const pad = padded[padded.length - 1];
-    if (pad < 1 || pad > 16) throw new Error('Invalid PKCS7 padding');
-    for (let i = padded.length - pad; i < padded.length; i++) {
-      if (padded[i] !== pad) throw new Error('Invalid PKCS7 padding');
-    }
-    return padded.slice(0, padded.length - pad);
   }
 
   // ============================================================
