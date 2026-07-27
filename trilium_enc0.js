@@ -1333,6 +1333,12 @@
     // round-trip is consistent.
     if (editor && editor.model && editor.model.change && editor.model.document) {
       const modelRe = /RU5DM[A-P][A-Za-z0-9+/=]{106,}/g;
+      // Regex for existing wrap markers. Note: these are
+      // HTML-escaped in the model (&lt; not <) because the
+      // wrap markers are inserted as text. We match the escaped
+      // form.
+      const openRe = /&lt;en-crypt\b[^&]*&gt;/g;
+      const closeRe = /&lt;\/en-crypt&gt;/g;
       // Insert the LITERAL "<en-crypt>" text. CKEditor will escape
       // the angle brackets to &lt; and &gt; when serializing to
       // HTML, which is exactly what the decrypt walker expects
@@ -1344,29 +1350,61 @@
       let wrappedCount = 0;
       let skipped = 0;
       editor.model.change(writer => {
-        function walk(node) {
+        // The walker tracks the "open depth" of wrap markers
+        // across text-node siblings. If a text node ends with an
+        // unclosed <en-crypt>, the next sibling inherits that
+        // open state. This way a wrap that spans multiple text
+        // nodes (CKEditor sometimes splits long text on insert)
+        // is still detected.
+        function walk(node, openDepth) {
           if (!node || typeof node.getChildren !== 'function') return 0;
           const children = Array.from(node.getChildren());
           let count = 0;
+          let depth = openDepth | 0;
           for (const child of children) {
             if (child.is && child.is('$text')) {
               const data = child.data || '';
-              // Skip text nodes that are already part of a
-              // wrap (start with &lt;en-crypt and end with
-              // &lt;/en-crypt&gt;) — no double-wrap.
-              if (/&lt;en-crypt\b/.test(data) && /&lt;\/en-crypt&gt;/.test(data)) continue;
-              // Find b64 matches in this text node.
-              const matches = [];
+              // Collect all b64 matches and wrap markers in this
+              // text node, in document order. For each b64,
+              // determine if it's inside an existing wrap by
+              // tracking the marker depth as we scan the data.
+              const items = [];
               let mm;
               modelRe.lastIndex = 0;
               while ((mm = modelRe.exec(data)) !== null) {
-                matches.push({ start: mm.index, end: mm.index + mm[0].length, text: mm[0] });
+                items.push({ start: mm.index, end: mm.index + mm[0].length, kind: 'b64', text: mm[0] });
               }
-              if (matches.length === 0) continue;
+              openRe.lastIndex = 0;
+              while ((mm = openRe.exec(data)) !== null) {
+                items.push({ start: mm.index, end: mm.index + mm[0].length, kind: 'open' });
+              }
+              closeRe.lastIndex = 0;
+              while ((mm = closeRe.exec(data)) !== null) {
+                items.push({ start: mm.index, end: mm.index + mm[0].length, kind: 'close' });
+              }
+              // Sort by start, then by kind (b64 first if same start
+              // — irrelevant in practice since regexes can't match
+              // the same position).
+              items.sort((a, b) => a.start - b.start);
+              // Walk the items, track depth, collect unwrapped b64s.
+              const unwrapped = [];
+              for (const it of items) {
+                if (it.kind === 'b64') {
+                  if (depth === 0) unwrapped.push(it);
+                } else if (it.kind === 'open') {
+                  depth++;
+                } else {
+                  // close — clamp to avoid negative from malformed input
+                  if (depth > 0) depth--;
+                }
+              }
+              if (unwrapped.length === 0) continue;
               const parent = child.parent;
-              if (!parent) { skipped += matches.length; continue; }
-              for (let i = matches.length - 1; i >= 0; i--) {
-                const m = matches[i];
+              if (!parent) { skipped += unwrapped.length; continue; }
+              // Process right-to-left so earlier positions stay
+              // valid as we insert.
+              for (let i = unwrapped.length - 1; i >= 0; i--) {
+                const m = unwrapped[i];
                 try {
                   const startOff = child.startOffset + m.start;
                   const endOff = child.startOffset + m.end;
@@ -1376,8 +1414,9 @@
                   writer.insertText(OPEN_TEXT, openPos);
                   count++;
                 } catch (e) {
-                  // Fall back: rewrite the text node data
-                  // directly via delete + createText + insert.
+                  // Fallback: rewrite the text node data via
+                  // delete + createText + insert. Used for edge
+                  // cases where position-based inserts fail.
                   try {
                     const newData = data.slice(0, m.start) + OPEN_TEXT + m.text + CLOSE_TEXT + data.slice(m.end);
                     const idx = (parent.getChildIndex && parent.getChildIndex(child));
@@ -1392,12 +1431,18 @@
                 }
               }
             } else if (child.is && child.is('element')) {
-              count += walk(child);
+              // Recurse. Inherit current depth.
+              const sub = walk(child, depth);
+              count += sub;
+              // (depth unchanged — element boundary resets nothing
+              // because wraps shouldn't span element boundaries
+              // like <p>, since the b64 + its wrap live in the
+              // same <p>.)
             }
           }
           return count;
         }
-        wrappedCount = walk(editor.model.document.getRoot());
+        wrappedCount = walk(editor.model.document.getRoot(), 0);
       });
       if (wrappedCount > 0) {
         g.notify('Tagged ' + wrappedCount + ' raw ENC0 blob' + (wrappedCount === 1 ? '' : 's') + '.');
