@@ -1277,8 +1277,16 @@
     if (!originalText) { g.notify('Note is empty.'); return; }
 
     // Collect existing <en-crypt> regions so we don't double-wrap.
+    // IMPORTANT: the text we're scanning might be the raw DB
+    // content (which has LITERAL <en-crypt> tags as HTML markup)
+    // OR the editor's getData() output (which has the wrap markers
+    // as TEXT — i.e. HTML-escaped &lt;en-crypt&gt;). We need to match
+    // BOTH forms. Without the escaped form, the second click of
+    // the wrap button on an already-wrapped blob would re-wrap it
+    // because the existing wrap (in escaped form) wouldn't be
+    // detected.
     const existingRegions = [];
-    const tagRe = /<en-crypt\b[^>]*>[\s\S]*?<\/en-crypt>/g;
+    const tagRe = /<en-crypt\b[^>]*>[\s\S]*?<\/en-crypt>|&lt;en-crypt\b[^&]*&gt;[\s\S]*?&lt;\/en-crypt&gt;/g;
     let m;
     while ((m = tagRe.exec(originalText))) {
       existingRegions.push([m.index, m.index + m[0].length]);

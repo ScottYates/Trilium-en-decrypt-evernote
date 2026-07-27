@@ -154,6 +154,53 @@ ClassicEditor.create(document.querySelector('#editor'), { licenseKey: 'GPL' }).t
   console.log('  opens:', open3, 'closes:', close3, '(should be 2 and 2)');
   const t3pass = open3 === 2 && close3 === 2;
 
+  // ---- Test 4: the ACTUAL user bug — click wrap twice on a
+  //  raw blob. After the first click, the editor has the wrap
+  //  markers as escaped TEXT (&lt;en-crypt&gt;...b64...&lt;/en-crypt&gt;).
+  //  The second click must NOT re-wrap. The b64 stays put,
+  //  the escapes stay put. Total: still 1 open + 1 close.
+  // The old bug: the existingRegions regex was `/<en-crypt\b...>`
+  // (literal form), which doesn't match the editor's escaped
+  // form, so the b64 was classified as unwrapped and wrapped
+  // AGAIN — producing &lt;en-crypt&gt;&lt;en-crypt&gt;...&lt;/en-crypt&gt;&lt;/en-crypt&gt;.
+  const d4 = await runTest(page, 'second click on already-wrapped blob (the user bug)',
+    '<p>' + b64s.b64_1 + '</p>');
+  console.log('  data after first click:', d4.slice(0, 250) + '...');
+  const open4 = (d4.match(/&lt;en-crypt\b/g) || []).length;
+  const close4 = (d4.match(/&lt;\/en-crypt&gt;/g) || []).length;
+  console.log('  opens:', open4, 'closes:', close4, '(should be 1 and 1, not 2)');
+  // Now click wrap a SECOND time on the same data
+  const server3 = require('http').createServer((req, res) => {
+    let url = req.url;
+    let filePath;
+    if (url === '/ckeditor.js') filePath = CK_PATH;
+    else { url = url === '/' ? '/index.html' : url; filePath = path.join(__dirname, url); }
+    const ext = path.extname(filePath);
+    const mime = { '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css' }[ext] || 'text/plain';
+    require('fs').readFile(filePath, (err, data) => {
+      if (err) { res.writeHead(404); res.end(); return; }
+      res.writeHead(200, { 'Content-Type': mime });
+      res.end(data);
+    });
+  });
+  // We need to keep the same page; the runTest already did goto
+  // and run the action once. We can just run it again.
+  // But the mock notes' content is updated to match the editor
+  // data, so we need to re-sync before the second click.
+  await page.evaluate(async () => {
+    window.__note._content = window.editor.getData();
+    await globalThis.__trilium_enc0__.actionWrapEnCryptBlobs();
+  });
+  await new Promise(r => setTimeout(r, 500));
+  const d4b = await page.evaluate(() => window.editor.getData());
+  server3.close();
+  console.log('  data after second click:', d4b.slice(0, 300) + '...');
+  const open4b = (d4b.match(/&lt;en-crypt\b/g) || []).length;
+  const close4b = (d4b.match(/&lt;\/en-crypt&gt;/g) || []).length;
+  console.log('  opens:', open4b, 'closes:', close4b, '(should STILL be 1 and 1)');
+  // Detect the double-wrap bug: more than 1 of each
+  const t4pass = open4b === 1 && close4b === 1;
+
   await browser.close();
 
   // ---- Summary ----
@@ -161,6 +208,7 @@ ClassicEditor.create(document.querySelector('#editor'), { licenseKey: 'GPL' }).t
   console.log('Test 1 (already-wrapped): ' + (t1pass ? 'PASS' : 'FAIL'));
   console.log('Test 2 (wrapped + raw in same node): ' + (t2pass ? 'PASS' : 'FAIL'));
   console.log('Test 3 (nested-style): ' + (t3pass ? 'PASS' : 'FAIL'));
-  const allPass = t1pass && t2pass && t3pass;
+  console.log('Test 4 (second click on already-wrapped — the user bug): ' + (t4pass ? 'PASS' : 'FAIL'));
+  const allPass = t1pass && t2pass && t3pass && t4pass;
   process.exit(allPass ? 0 : 1);
 })().catch(e => { console.error('Test runner crashed:', e); process.exit(2); });
