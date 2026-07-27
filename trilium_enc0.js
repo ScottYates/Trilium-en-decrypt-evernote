@@ -1234,27 +1234,49 @@
   // in a <en-crypt> tag so the decrypt action can find it. This is
   // for notes that were imported from Evernote/ENEX where the
   // <en-crypt> wrapper was stripped or the plaintext was pasted
-  // directly. We identify a blob by:
-  //   - starts with the base64 of "ENC0" (i.e. "RU5DMA==")
-  //   - has at least 84 raw bytes of content (4 magic + 16 salt +
-  //     16 salthmac + 16 iv + 32 hmac = 84), which is 112 base64
-  //     chars including the "RU5DMA==" prefix
-  //   - is a continuous run of base64 chars (no whitespace, no
-  //     '<', no '>') — so it won't match across HTML tags
-  //   - is not already inside an existing <en-crypt>...</en-crypt>
-  // The HMAC is NOT verified (we don't have a password yet); we
-  // just tag the text so a later decrypt-with-password can pick it
-  // up. A bad tag will just fail to decrypt.
+  // directly.
+  //
+  // We identify a blob by:
+  //   - starts with the b64 of "ENC0" magic (i.e. "RU5DM" + a char
+  //     in 'A'..'P', since byte 4 of every ENC0 blob is 0x30)
+  //   - at least 112 b64 chars (= 84 raw bytes — the minimum blob)
+  //   - is a continuous run of b64 chars (no whitespace, <, or >)
+  //   - is not already inside an existing <en-crypt> tag
+  //
+  // CRITICAL: CKEditor 5's setData() strips unknown elements like
+  // <en-crypt>. We verified this empirically (test_ckeditor_sanitize.js).
+  // So we CANNOT use setData() to put the wrapped version back in the
+  // editor. Instead we manipulate the model directly: find the text
+  // node containing the b64, split it, and insert the wrap markers
+  // as HTML-escaped text (matching the format the decrypt action
+  // already expects). When the editor renders, the &lt; entity
+  // becomes a literal "<" on screen and survives a roundtrip.
   async function actionWrapEnCryptBlobs() {
     const g = globalThis.__trilium_enc0__;
     const note = await g.getActiveNote();
     if (!note) { g.notifyError('No active note.'); return; }
-    const originalText = await g.getNoteText(note);
+
+    // Get the current text. Prefer the editor's data (which is
+    // what the user actually sees), fall back to the DB text.
+    let originalText = '';
+    const ed = await g.getActiveTextEditor();
+    let editor = null;
+    if (ed) {
+      editor = (ed._context && ed._context.editor) || ed;
+      try {
+        if (typeof editor.getData === 'function') {
+          originalText = editor.getData();
+        } else if (typeof ed.getSelectedHtml === 'function') {
+          originalText = ed.getSelectedHtml();
+        }
+      } catch (e) {}
+    }
+    if (!originalText) {
+      originalText = await g.getNoteText(note);
+    }
     if (!originalText) { g.notify('Note is empty.'); return; }
 
     // Collect existing <en-crypt> regions so we don't double-wrap.
-    // We use a list of [start, end] pairs and check each raw-blob
-    // match against them.
     const existingRegions = [];
     const tagRe = /<en-crypt\b[^>]*>[\s\S]*?<\/en-crypt>/g;
     let m;
@@ -1262,23 +1284,12 @@
       existingRegions.push([m.index, m.index + m[0].length]);
     }
 
-    // Find raw ENC0 blobs. The b64 of the first 4 bytes ("ENC0" =
-    // 0x45 0x4E 0x43 0x30) is "RU5DM" followed by a char in 'A'..'P'
-    // (the high nibble of the 5th byte is 0 because byte 4 is 0x30).
-    // The 6th b64 char encodes 00xxxx where xxxx is the high nibble
-    // of byte 5, so it falls in 'A' (00 0000) to 'P' (00 1111).
-    // (The full "RU5DMA==" prefix only appears for a 4-byte blob;
-    // longer blobs shift the boundary and produce a different 6th
-    // char.) We require 104+ more b64 chars (so the raw bytes are
-    // at least 84 — the 4 magic + 16 salt + 16 salthmac + 16 iv +
-    // 32 hmac minimum). The regex doesn't match across whitespace,
-    // '<', or '>', so it won't grab HTML tags.
+    // Find raw ENC0 blobs.
     const blobRe = /RU5DM[A-P][A-Za-z0-9+/=]{106,}/g;
     const candidates = [];
     while ((m = blobRe.exec(originalText))) {
       const start = m.index;
       const end = start + m[0].length;
-      // Skip if this blob is inside an existing <en-crypt> tag.
       let insideExisting = false;
       for (const [rs, re] of existingRegions) {
         if (start >= rs && end <= re) { insideExisting = true; break; }
@@ -1293,46 +1304,111 @@
       return;
     }
 
-    // Wrap each match. Build the new text right-to-left so the
-    // earlier indices don't shift as we insert text.
+    // Build the new text for the DB. We use the literal
+    // <en-crypt>...</en-crypt> tags here. When stored to the DB,
+    // the encrypt tags are HTML markup and will round-trip through
+    // getContent.
+    const WRAP_OPEN = '<en-crypt cipher="AES" hint="" length="128">';
+    const WRAP_CLOSE = '</en-crypt>';
     let newText = originalText;
     for (let i = candidates.length - 1; i >= 0; i--) {
       const { start, end, text: blob } = candidates[i];
-      newText = newText.slice(0, start)
-        + '<en-crypt cipher="AES" hint="" length="128">' + blob + '</en-crypt>'
-        + newText.slice(end);
+      newText = newText.slice(0, start) + WRAP_OPEN + blob + WRAP_CLOSE + newText.slice(end);
     }
-
     await g.setNoteText(note, newText);
 
-    // Refresh the editor view so the user sees the wrapped version.
-    // We use the same cascade as the decrypt action: CKEditor 5
-    // model API first (preserves formatting), then setData
-    // fallback, then DOM replacement.
-    const ed = await g.getActiveTextEditor();
-    if (ed) {
-      const editor = (ed._context && ed._context.editor) || ed;
-      // The simplest reliable update is setData — the model is
-      // small and the user just ran an explicit "wrap" action.
-      if (typeof ed.getData === 'function' && typeof ed.setData === 'function') {
-        try { ed.setData(newText); } catch (e) { /* best effort */ }
-      } else {
-        const root = editor.model && editor.model.document && editor.model.document.getRoot();
-        if (root && editor.model.change) {
-          editor.model.change(writer => {
-            try {
-              while (root.getChild(0)) writer.remove(root.getChild(0));
-            } catch (e) {}
-            try {
-              const fragment = writer.createHtmlElementFromString(newText);
-              writer.insert(fragment, root, 'end');
-            } catch (e) {}
-          });
+    // Update the editor model directly. We use the same position-
+    // based approach as the decrypt walker: get the parent of the
+    // text node, use createPositionAt with offsets, and insert the
+    // wrap markers as escaped text. This way we don't have to
+    // delete and re-insert text nodes (which CKEditor's model API
+    // makes awkward).
+    //
+    // IMPORTANT: in the model, the wrap markers are TEXT with
+    // &lt; and &gt; entities, not real <en-crypt> elements. When
+    // the editor serializes to HTML, &lt; becomes literal "<" and
+    // &gt; becomes literal ">" — the user sees the wrap as plain
+    // text in the note. The decrypt action already expects this
+    // representation and its walker handles the &lt; form, so the
+    // round-trip is consistent.
+    if (editor && editor.model && editor.model.change && editor.model.document) {
+      const modelRe = /RU5DM[A-P][A-Za-z0-9+/=]{106,}/g;
+      // Insert the LITERAL "<en-crypt>" text. CKEditor will escape
+      // the angle brackets to &lt; and &gt; when serializing to
+      // HTML, which is exactly what the decrypt walker expects
+      // (it looks for &lt;en-crypt&gt; in the model). If we
+      // pre-escape to &lt;, CKEditor would escape the '&' to '&amp;'
+      // and produce &amp;lt; — which is wrong.
+      const OPEN_TEXT = '<en-crypt cipher="AES" hint="" length="128">';
+      const CLOSE_TEXT = '</en-crypt>';
+      let wrappedCount = 0;
+      let skipped = 0;
+      editor.model.change(writer => {
+        function walk(node) {
+          if (!node || typeof node.getChildren !== 'function') return 0;
+          const children = Array.from(node.getChildren());
+          let count = 0;
+          for (const child of children) {
+            if (child.is && child.is('$text')) {
+              const data = child.data || '';
+              // Skip text nodes that are already part of a
+              // wrap (start with &lt;en-crypt and end with
+              // &lt;/en-crypt&gt;) — no double-wrap.
+              if (/&lt;en-crypt\b/.test(data) && /&lt;\/en-crypt&gt;/.test(data)) continue;
+              // Find b64 matches in this text node.
+              const matches = [];
+              let mm;
+              modelRe.lastIndex = 0;
+              while ((mm = modelRe.exec(data)) !== null) {
+                matches.push({ start: mm.index, end: mm.index + mm[0].length, text: mm[0] });
+              }
+              if (matches.length === 0) continue;
+              const parent = child.parent;
+              if (!parent) { skipped += matches.length; continue; }
+              for (let i = matches.length - 1; i >= 0; i--) {
+                const m = matches[i];
+                try {
+                  const startOff = child.startOffset + m.start;
+                  const endOff = child.startOffset + m.end;
+                  const closePos = writer.createPositionAt(parent, endOff);
+                  writer.insertText(CLOSE_TEXT, closePos);
+                  const openPos = writer.createPositionAt(parent, startOff);
+                  writer.insertText(OPEN_TEXT, openPos);
+                  count++;
+                } catch (e) {
+                  // Fall back: rewrite the text node data
+                  // directly via delete + createText + insert.
+                  try {
+                    const newData = data.slice(0, m.start) + OPEN_TEXT + m.text + CLOSE_TEXT + data.slice(m.end);
+                    const idx = (parent.getChildIndex && parent.getChildIndex(child));
+                    if (typeof idx !== 'number') { skipped++; continue; }
+                    const newText = writer.createText(newData);
+                    writer.insert(newText, parent, idx);
+                    writer.remove(child);
+                    count++;
+                  } catch (e2) {
+                    skipped++;
+                  }
+                }
+              }
+            } else if (child.is && child.is('element')) {
+              count += walk(child);
+            }
+          }
+          return count;
         }
+        wrappedCount = walk(editor.model.document.getRoot());
+      });
+      if (wrappedCount > 0) {
+        g.notify('Tagged ' + wrappedCount + ' raw ENC0 blob' + (wrappedCount === 1 ? '' : 's') + '.');
+      } else if (skipped > 0) {
+        g.notify('Tagged ' + candidates.length + ' raw ENC0 blob' + (candidates.length === 1 ? '' : 's') + ' (note only — editor view was not updated).');
+      } else {
+        g.notify('Tagged ' + candidates.length + ' raw ENC0 blob' + (candidates.length === 1 ? '' : 's') + ' (note only — model walker found nothing).');
       }
+    } else {
+      g.notify('Tagged ' + candidates.length + ' raw ENC0 blob' + (candidates.length === 1 ? '' : 's') + ' (note only — no editor available).');
     }
-
-    g.notify('Tagged ' + candidates.length + ' raw ENC0 blob' + (candidates.length === 1 ? '' : 's') + '.');
   }
 
   // ============================================================
